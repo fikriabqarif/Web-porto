@@ -25,8 +25,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(hashSync(password, 12).replace(/\$/g, "\\$"));
-  console.error("\nCopy that into ADMIN_PASSWORD_HASH (the \\$ escapes are required in .env).");
+  const hash = hashSync(password, 12);
+
+  // Raw form first: this is what hosting dashboards (Vercel etc.) need, since
+  // they store the value literally. The escaped form is only for local .env
+  // files, where Next's loader would otherwise expand/strip `$2b`.
+  console.log(hash);
+  console.error("\nHosting dashboard (Vercel/Netlify/CI secret) -> paste the line above as-is.");
+  console.error(`Local .env -> use: ADMIN_PASSWORD_HASH=${hash.replace(/\$/g, "\\$")}`);
 }
 
 main().catch((error) => {

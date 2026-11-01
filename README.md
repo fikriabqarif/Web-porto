@@ -36,6 +36,13 @@ Paste the printed hash into `ADMIN_PASSWORD_HASH` in `.env`. The email you put i
 entirely in environment variables, so rotating the password means re-running the
 script and restarting the server.
 
+Escaping differs by target: a local `.env` file needs every `$` written as `\$`
+(Next's loader would otherwise expand `$2b` and mangle the hash), while a hosting
+dashboard such as Vercel stores the value literally and needs the **raw** hash
+with plain `$`. A `\$` hash in Vercel is not a valid bcrypt salt, so every login
+fails with "Invalid email or password" and the server logs a
+`[auth] ADMIN_PASSWORD_HASH is not a bcrypt hash` line.
+
 Production-style run:
 
 ```bash
@@ -72,7 +79,7 @@ sudo -u postgres psql -c "CREATE DATABASE webporto OWNER webporto;"
 | `DATABASE_URL_UNPOOLED` | Neon only | **Direct** (unpooled) Neon string, used only by the Prisma CLI for `migrate`/`db push`/introspect via `directUrl` in `schema.prisma`. Point it at the same local URL when working against local Postgres. |
 | `AUTH_SECRET` | yes | Auth.js signing secret. Generate with `openssl rand -base64 32`. |
 | `ADMIN_EMAIL` | yes | The single admin login email. |
-| `ADMIN_PASSWORD_HASH` | yes | bcrypt hash of the admin password from `npm run hash-password`. |
+| `ADMIN_PASSWORD_HASH` | yes | bcrypt hash of the admin password from `npm run hash-password`. Raw `$` form for hosting dashboards; `\$`-escaped only in a local `.env`. |
 | `BLOB_READ_WRITE_TOKEN` | prod only | Vercel Blob token for image/CV uploads. Without it uploads fall back to `public/uploads/`. |
 | `RESEND_API_KEY` | optional | If set, contact messages are also emailed to `contactEmail`. Without it they are only stored in the admin inbox. |
 | `NEXT_PUBLIC_SITE_URL` | yes | Absolute site URL used for metadata, Open Graph and `sitemap.xml`. |
