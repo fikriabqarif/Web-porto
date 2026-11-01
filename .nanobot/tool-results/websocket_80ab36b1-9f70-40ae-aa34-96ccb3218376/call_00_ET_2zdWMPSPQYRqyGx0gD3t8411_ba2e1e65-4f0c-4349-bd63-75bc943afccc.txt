@@ -1,0 +1,183 @@
+=========== src/lib/auth-guard.ts
+import { auth } from "@/auth";
+
+export async function getSession() {
+  return auth();
+}
+
+export async function isAdmin(): Promise<boolean> {
+  const session = await auth();
+  return Boolean(session?.user);
+}
+=========== src/lib/admin-path.ts
+/**
+ * The admin area never shows up at an obvious URL. Real routes stay under
+ * `/admin` (hidden and 404'd by middleware); the only way in is the value of
+ * ADMIN_SECRET_PATH, which is normalised here and exposed to the client bundle
+ * as NEXT_PUBLIC_ADMIN_PATH by next.config.ts.
+ *
+ * Changing the path = change ADMIN_SECRET_PATH and rebuild.
+ */
+const raw = (process.env.NEXT_PUBLIC_ADMIN_PATH ?? "/admin").trim().replace(/\/+$/, "");
+
+export const ADMIN_BASE = raw === "" ? "/admin" : raw;
+
+export const ADMIN_LOGIN_PATH = `${ADMIN_BASE}/login`;
+
+/** Build a visible (secret-prefixed) admin URL: adminHref("/projects"). */
+export function adminHref(path = ""): string {
+  if (!path || path === "/") return ADMIN_BASE;
+  return `${ADMIN_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+=========== src/lib/rate-limit.ts
+type Bucket = { count: number; resetAt: number };
+
+const globalForLimit = globalThis as unknown as { __rateBuckets?: Map<string, Bucket> };
+const buckets = (globalForLimit.__rateBuckets ??= new Map<string, Bucket>());
+
+export type RateLimitResult = { ok: boolean; remaining: number; resetAt: number };
+
+/**
+ * Fixed-window rate limiter held in process memory.
+ * Good enough for a single-instance deployment; on serverless/Vercel the count
+ * resets whenever a new lambda instance boots (documented in README).
+ */
+export function rateLimit(key: string, limit: number, windowMs: number): RateLimitResult {
+  const now = Date.now();
+  const existing = buckets.get(key);
+
+  if (!existing || existing.resetAt <= now) {
+    const resetAt = now + windowMs;
+    buckets.set(key, { count: 1, resetAt });
+    return { ok: true, remaining: limit - 1, resetAt };
+  }
+
+  if (existing.count >= limit) {
+    return { ok: false, remaining: 0, resetAt: existing.resetAt };
+  }
+
+  existing.count += 1;
+  return { ok: true, remaining: limit - existing.count, resetAt: existing.resetAt };
+}
+
+export function getClientIp(headers: Headers): string {
+  const forwarded = headers.get("x-forwarded-for");
+  if (forwarded) {
+    const first = forwarded.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  return headers.get("x-real-ip") ?? "unknown";
+}
+=========== src/lib/contact.ts
+import { prisma } from "@/lib/prisma";
+import { getSettings } from "@/lib/settings";
+import { site } from "@/content/profile";
+
+export type ContactPayload = { name: string; email: string; body: string };
+
+export type ContactResult = { ok: true } | { ok: false; error: string; status: number };
+
+/**
+ * Stores a contact message. Used by both the server action (the /contact form)
+ * and POST /api/contact so the two paths can never drift apart.
+ */
+export async function createContactMessage(payload: ContactPayload): Promise<ContactResult> {
+  const { name, email, body } = payload;
+
+  try {
+    await prisma.message.create({ data: { name, email, body } });
+  } catch {
+    return { ok: false, error: "Could not save your message. Please try again.", status: 500 };
+  }
+
+  const apiKey = process.env.RESEND_API_KEY;
+  if (apiKey) {
+    try {
+      const { Resend } = await import("resend");
+      const settings = await getSettings(site.email);
+      const to = settings.contactEmail || site.email;
+      if (to) {
+        const resend = new Resend(apiKey);
+        await resend.emails.send({
+          from: process.env.RESEND_FROM ?? "Portfolio <onboarding@resend.dev>",
+          to,
+          replyTo: email,
+          subject: `New portfolio message from ${name}`,
+          text: `From: ${name} <${email}>\n\n${body}`,
+        });
+      }
+    } catch {
+      // The message is already in the database — email is best-effort only.
+    }
+  }
+
+  return { ok: true };
+}
+=========== src/lib/form-state.ts
+export type FormState = {
+  status: "idle" | "success" | "error";
+  message?: string;
+  errors?: Record<string, string>;
+};
+
+export const idleState: FormState = { status: "idle" };
+=========== src/lib/upload.ts
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { put } from "@vercel/blob";
+import { ALLOWED_UPLOAD_TYPES, MAX_UPLOAD_BYTES } from "@/lib/validation";
+
+const EXT_BY_TYPE: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "application/pdf": "pdf",
+};
+
+export class UploadError extends Error {
+  constructor(
+    message: string,
+    readonly status = 400,
+  ) {
+    super(message);
+    this.name = "UploadError";
+  }
+}
+
+/**
+ * Stores an uploaded file.
+ * With BLOB_READ_WRITE_TOKEN set (production) it goes to Vercel Blob.
+ * Without it (local development) it is written to /public/uploads so the whole
+ * admin flow stays testable offline.
+ */
+export async function storeFile(file: File, prefix = "uploads"): Promise<string> {
+  if (!ALLOWED_UPLOAD_TYPES.includes(file.type as (typeof ALLOWED_UPLOAD_TYPES)[number])) {
+    throw new UploadError("Unsupported file type. Use JPEG, PNG, WebP or PDF.");
+  }
+  if (file.size === 0) throw new UploadError("The file is empty.");
+  if (file.size > MAX_UPLOAD_BYTES) throw new UploadError("Files must be 4 MB or smaller.", 413);
+
+  const ext = EXT_BY_TYPE[file.type] ?? "bin";
+  const filename = `${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
+  const key = `${prefix}/${filename}`;
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+
+  if (token) {
+    const blob = await put(key, file, {
+      access: "public",
+      contentType: file.type,
+      addRandomSuffix: false,
+      token,
+    });
+    return blob.url;
+  }
+
+  const destination = path.join(process.cwd(), "public", prefix, filename);
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, Buffer.from(await file.arrayBuffer()));
+  return `/${key}`;
+}
+
+
+Exit code: 0

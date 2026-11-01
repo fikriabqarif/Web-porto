@@ -1,0 +1,7 @@
+env files: .env | ADMIN_EMAIL set: true | ADMIN_PASSWORD_HASH set: true
+   ▲ Next.js 15.5.28
+   - Local:        http://localhost:3000
+   - Network:      http://192.168.0.140:3000
+
+ ✓ Starting...
+ ✓ Ready in 3.5s

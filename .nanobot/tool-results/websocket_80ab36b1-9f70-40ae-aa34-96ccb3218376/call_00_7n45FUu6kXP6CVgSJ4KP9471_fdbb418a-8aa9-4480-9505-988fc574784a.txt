@@ -1,0 +1,247 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { isAdmin } from "@/lib/auth-guard";
+import type { FormState } from "@/lib/form-state";
+import { setSetting, getSettings } from "@/lib/settings";
+import { storeFile, UploadError } from "@/lib/upload";
+import { flattenFieldErrors, settingsSchema } from "@/lib/validation";
+
+function text(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : "";
+}
+
+function revalidateSite(): void {
+  revalidatePath("/");
+  revalidatePath("/about");
+  revalidatePath("/contact");
+  revalidatePath("/admin/settings");
+}
+
+export async function saveSettings(_previous: FormState, formData: FormData): Promise<FormState> {
+  if (!(await isAdmin())) return { status: "error", message: "Your session has expired. Please log in again." };
+
+  const parsed = settingsSchema.safeParse({
+    contactEmail: text(formData, "contactEmail"),
+    github: text(formData, "github"),
+    linkedin: text(formData, "linkedin"),
+    instagram: text(formData, "instagram"),
+  });
+
+  if (!parsed.success) {
+    return {
+      status: "error",
+      message: "Please fix the highlighted fields.",
+      errors: flattenFieldErrors(parsed.error),
+    };
+  }
+
+  const data = parsed.data;
+
+  await setSetting("contactEmail", data.contactEmail);
+  await setSetting(
+    "socials",
+    JSON.stringify({ github: data.github, linkedin: data.linkedin, instagram: data.instagram }),
+  );
+
+  revalidateSite();
+  return { status: "success", message: "Settings saved." };
+}
+
+export async function uploadCv(_previous: FormState, formData: FormData): Promise<FormState> {
+  if (!(await isAdmin())) return { status: "error", message: "Your session has expired. Please log in again." };
+
+  const file = formData.get("cv");
+  if (!(file instanceof File) || file.size === 0) {
+    return { status: "error", message: "Choose a PDF file first.", errors: { cv: "Choose a PDF file first." } };
+  }
+  if (file.type !== "application/pdf") {
+    return { status: "error", message: "The CV must be a PDF.", errors: { cv: "The CV must be a PDF." } };
+  }
+
+  try {
+    const url = await storeFile(file, "cv");
+    await setSetting("cvUrl", url);
+    revalidateSite();
+    return { status: "success", message: "CV uploaded." };
+  } catch (error) {
+    if (error instanceof UploadError) return { status: "error", message: error.message, errors: { cv: error.message } };
+    return { status: "error", message: "Upload failed. Please try again.", errors: { cv: "Upload failed." } };
+  }
+}
+
+export async function removeCv(): Promise<FormState> {
+  if (!(await isAdmin())) return { status: "error", message: "Your session has expired. Please log in again." };
+  await setSetting("cvUrl", "");
+  revalidateSite();
+  return { status: "success", message: "CV removed." };
+}
+
+export async function readSettings(): Promise<FormState> {
+  if (!(await isAdmin())) return { status: "error", message: "Not authorized." };
+  const settings = await getSettings();
+  return { status: "success", message: settings.cvUrl };
+}
+====
+import { prisma } from "@/lib/prisma";
+
+export type Socials = { github: string; linkedin: string; instagram: string };
+
+export type SiteSettings = {
+  contactEmail: string;
+  cvUrl: string;
+  socials: Socials;
+};
+
+const EMPTY_SOCIALS: Socials = { github: "", linkedin: "", instagram: "" };
+
+function parseSocials(raw: string | undefined): Socials {
+  if (!raw) return { ...EMPTY_SOCIALS };
+  try {
+    const parsed = JSON.parse(raw) as Partial<Record<keyof Socials, unknown>>;
+    const pick = (value: unknown) => (typeof value === "string" ? value : "");
+    return {
+      github: pick(parsed.github),
+      linkedin: pick(parsed.linkedin),
+      instagram: pick(parsed.instagram),
+    };
+  } catch {
+    return { ...EMPTY_SOCIALS };
+  }
+}
+
+export async function getSettings(fallbackEmail = ""): Promise<SiteSettings> {
+  let rows: { key: string; value: string }[] = [];
+  try {
+    rows = await prisma.setting.findMany();
+  } catch {
+    // Database not reachable yet (fresh clone before `prisma migrate`).
+    rows = [];
+  }
+
+  const map = new Map(rows.map((row) => [row.key, row.value]));
+
+  return {
+    contactEmail: map.get("contactEmail") || fallbackEmail,
+    cvUrl: map.get("cvUrl") || "",
+    socials: parseSocials(map.get("socials")),
+  };
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  await prisma.setting.upsert({
+    where: { key },
+    create: { key, value },
+    update: { value },
+  });
+}
+====
+import Link from "next/link";
+import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+export default async function AdminDashboardPage() {
+  const [projectCount, publishedProjects, postCount, publishedPosts, unreadMessages, totalMessages] =
+    await Promise.all([
+      prisma.project.count(),
+      prisma.project.count({ where: { published: true } }),
+      prisma.post.count(),
+      prisma.post.count({ where: { published: true } }),
+      prisma.message.count({ where: { read: false } }),
+      prisma.message.count(),
+    ]);
+
+  const stats = [
+    {
+      href: "/admin/projects",
+      label: "Projects",
+      value: projectCount,
+      detail: `${publishedProjects} published · ${projectCount - publishedProjects} draft`,
+    },
+    {
+      href: "/admin/posts",
+      label: "Notes",
+      value: postCount,
+      detail: `${publishedPosts} published · ${postCount - publishedPosts} draft`,
+    },
+    {
+      href: "/admin/messages",
+      label: "Unread messages",
+      value: unreadMessages,
+      detail: `${totalMessages} total`,
+    },
+  ];
+
+  return (
+    <div className="space-y-10">
+      <header className="space-y-2">
+        <p className="label">Dashboard</p>
+        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
+      </header>
+
+      <ul className="grid gap-px sm:grid-cols-3">
+        {stats.map((stat) => (
+          <li key={stat.href}>
+            <Link
+              href={stat.href}
+              className="block space-y-2 border border-border p-6 transition-colors duration-150 hover:border-foreground"
+            >
+              <p className="label">{stat.label}</p>
+              <p className="text-4xl font-bold tracking-tight">{stat.value}</p>
+              <p className="text-xs text-muted">{stat.detail}</p>
+            </Link>
+          </li>
+        ))}
+      </ul>
+
+      <div className="flex flex-wrap gap-3">
+        <Link href="/admin/projects/new" className="btn-primary">
+          New project
+        </Link>
+        <Link href="/admin/posts/new" className="btn-secondary">
+          New note
+        </Link>
+        <Link href="/admin/settings" className="btn-secondary">
+          Settings
+        </Link>
+      </div>
+    </div>
+  );
+}
+====
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { isAdmin } from "@/lib/auth-guard";
+import { prisma } from "@/lib/prisma";
+
+function text(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : "";
+}
+
+export async function setMessageRead(formData: FormData): Promise<void> {
+  if (!(await isAdmin())) return;
+  const id = text(formData, "id");
+  if (!id) return;
+
+  const read = text(formData, "read") === "true";
+  await prisma.message.update({ where: { id }, data: { read } });
+  revalidatePath("/admin/messages");
+  revalidatePath("/admin");
+}
+
+export async function deleteMessage(formData: FormData): Promise<void> {
+  if (!(await isAdmin())) return;
+  const id = text(formData, "id");
+  if (!id) return;
+
+  await prisma.message.delete({ where: { id } });
+  revalidatePath("/admin/messages");
+  revalidatePath("/admin");
+}
+
+
+Exit code: 0

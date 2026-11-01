@@ -1,0 +1,209 @@
+"use server";
+
+import { headers } from "next/headers";
+import { createContactMessage } from "@/lib/contact";
+import { idleState, type FormState } from "@/lib/form-state";
+import { getClientIp, rateLimit } from "@/lib/rate-limit";
+import { contactSchema, flattenFieldErrors } from "@/lib/validation";
+
+const ONE_HOUR = 60 * 60 * 1000;
+const HONEYPOT_SUCCESS: FormState = {
+  status: "success",
+  message: "Thanks — your message has been sent.",
+};
+
+function field(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : "";
+}
+
+export async function submitContact(_previous: FormState = idleState, formData: FormData): Promise<FormState> {
+  const parsed = contactSchema.safeParse({
+    name: field(formData, "name"),
+    email: field(formData, "email"),
+    body: field(formData, "body"),
+    website: field(formData, "website"),
+  });
+
+  if (!parsed.success) {
+    return {
+      status: "error",
+      message: "Please fix the highlighted fields.",
+      errors: flattenFieldErrors(parsed.error),
+    };
+  }
+
+  // Honeypot filled in: pretend everything worked and drop the message.
+  if (parsed.data.website.trim().length > 0) return HONEYPOT_SUCCESS;
+
+  const ip = getClientIp(await headers());
+  const limit = rateLimit(`contact:${ip}`, 5, ONE_HOUR);
+  if (!limit.ok) {
+    return { status: "error", message: "Too many messages from this address. Please try again later." };
+  }
+
+  const result = await createContactMessage({
+    name: parsed.data.name,
+    email: parsed.data.email,
+    body: parsed.data.body,
+  });
+
+  if (!result.ok) return { status: "error", message: result.error };
+  return HONEYPOT_SUCCESS;
+}
+======== contact-form
+"use client";
+
+import { useActionState } from "react";
+import { submitContact } from "@/actions/contact";
+import { idleState } from "@/lib/form-state";
+
+export function ContactForm() {
+  const [state, formAction, pending] = useActionState(submitContact, idleState);
+  const errors = state.errors ?? {};
+
+  if (state.status === "success") {
+    return (
+      <div role="status" className="space-y-3 border border-border p-6">
+        <p className="text-base font-medium text-foreground">{state.message}</p>
+        <p className="text-sm text-muted">I usually reply within a few days.</p>
+      </div>
+    );
+  }
+
+  return (
+    <form action={formAction} className="space-y-6" noValidate>
+      {state.status === "error" && state.message ? (
+        <p role="alert" className="field-error">
+          {state.message}
+        </p>
+      ) : null}
+
+      <div className="space-y-2">
+        <label htmlFor="name" className="label block">
+          Name
+        </label>
+        <input
+          id="name"
+          name="name"
+          type="text"
+          autoComplete="name"
+          required
+          className="input"
+          aria-invalid={Boolean(errors.name)}
+          aria-describedby={errors.name ? "name-error" : undefined}
+        />
+        {errors.name ? (
+          <p id="name-error" className="field-error">
+            {errors.name}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="email" className="label block">
+          Email
+        </label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autoComplete="email"
+          required
+          className="input"
+          aria-invalid={Boolean(errors.email)}
+          aria-describedby={errors.email ? "email-error" : undefined}
+        />
+        {errors.email ? (
+          <p id="email-error" className="field-error">
+            {errors.email}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="body" className="label block">
+          Message
+        </label>
+        <textarea
+          id="body"
+          name="body"
+          rows={7}
+          required
+          className="textarea"
+          aria-invalid={Boolean(errors.body)}
+          aria-describedby={errors.body ? "body-error" : undefined}
+        />
+        {errors.body ? (
+          <p id="body-error" className="field-error">
+            {errors.body}
+          </p>
+        ) : null}
+      </div>
+
+      {/* Honeypot: hidden from humans, catnip for bots. */}
+      <div aria-hidden="true" className="absolute -left-[9999px] top-auto h-px w-px overflow-hidden">
+        <label htmlFor="website">Website</label>
+        <input id="website" name="website" type="text" tabIndex={-1} autoComplete="off" />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-4">
+        <button type="submit" className="btn-primary" disabled={pending}>
+          {pending ? "Sending…" : "Send message"}
+        </button>
+        <p className="text-xs text-muted">No newsletters, no tracking — just a reply.</p>
+      </div>
+    </form>
+  );
+}
+======== api/contact
+import { NextResponse } from "next/server";
+import { createContactMessage } from "@/lib/contact";
+import { getClientIp, rateLimit } from "@/lib/rate-limit";
+import { contactSchema } from "@/lib/validation";
+
+export const runtime = "nodejs";
+
+const ONE_HOUR = 60 * 60 * 1000;
+
+export async function POST(request: Request): Promise<NextResponse> {
+  let payload: unknown;
+  try {
+    payload = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const parsed = contactSchema.safeParse(payload);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Validation failed", issues: parsed.error.flatten().fieldErrors },
+      { status: 422 },
+    );
+  }
+
+  // Honeypot: accept silently so bots cannot tell they were filtered.
+  if (parsed.data.website.trim().length > 0) return NextResponse.json({ ok: true });
+
+  const ip = getClientIp(request.headers);
+  const limit = rateLimit(`contact:${ip}`, 5, ONE_HOUR);
+  if (!limit.ok) {
+    const retryAfter = Math.max(1, Math.ceil((limit.resetAt - Date.now()) / 1000));
+    return NextResponse.json(
+      { error: "Too many messages from this address. Try again later." },
+      { status: 429, headers: { "Retry-After": String(retryAfter) } },
+    );
+  }
+
+  const result = await createContactMessage({
+    name: parsed.data.name,
+    email: parsed.data.email,
+    body: parsed.data.body,
+  });
+
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+  return NextResponse.json({ ok: true }, { status: 201 });
+}
+
+
+Exit code: 0

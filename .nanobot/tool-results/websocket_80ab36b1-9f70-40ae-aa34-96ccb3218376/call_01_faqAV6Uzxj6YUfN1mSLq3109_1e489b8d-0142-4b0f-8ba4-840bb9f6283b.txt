@@ -1,0 +1,264 @@
+===== src/components/nav-links.tsx =====
+import Link from "next/link";
+
+export const NAV_LINKS = [
+  { href: "/projects", label: "Projects" },
+  { href: "/notes", label: "Notes" },
+  { href: "/about", label: "About" },
+  { href: "/contact", label: "Contact" },
+] as const;
+
+export function NavLink({ href, label }: { href: string; label: string }) {
+  return (
+    <Link
+      href={href}
+      className="text-sm text-muted underline-offset-4 transition-colors duration-150 hover:text-foreground hover:underline"
+    >
+      {label}
+    </Link>
+  );
+}
+===== src/components/project-card.tsx =====
+import Link from "next/link";
+import Image from "next/image";
+import { TagList } from "@/components/tag-list";
+
+type ProjectCardProps = {
+  slug: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  image?: { url: string; alt: string } | undefined;
+};
+
+export function ProjectCard({ slug, title, summary, tags, image }: ProjectCardProps) {
+  return (
+    <article className="group border border-border transition-colors duration-150 hover:border-foreground">
+      <Link href={`/projects/${slug}`} className="block focus-visible:outline-none">
+        <div className="relative aspect-[16/10] w-full overflow-hidden border-b border-border bg-muted/10">
+          {image ? (
+            <Image
+              src={image.url}
+              alt={image.alt}
+              fill
+              sizes="(min-width: 768px) 45vw, 100vw"
+              className="object-cover"
+            />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center">
+              <span className="label">No image</span>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-3 p-6">
+          <h3 className="text-lg font-bold tracking-tight text-foreground underline-offset-4 group-hover:underline">
+            {title}
+          </h3>
+          <p className="text-sm leading-relaxed text-muted">{summary}</p>
+          <TagList tags={tags} />
+        </div>
+      </Link>
+    </article>
+  );
+}
+===== src/app/(site)/projects/page.tsx =====
+import type { Metadata } from "next";
+import { ProjectCard } from "@/components/project-card";
+import { pageMetadata, site } from "@/content/profile";
+import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = pageMetadata({
+  title: "Projects",
+  description: `Hardware and software projects by ${site.name}.`,
+  path: "/projects",
+});
+
+export default async function ProjectsPage() {
+  const projects = await prisma.project.findMany({
+    where: { published: true },
+    orderBy: { createdAt: "desc" },
+    include: { images: { orderBy: { sortOrder: "asc" }, take: 1 } },
+  });
+
+  return (
+    <div className="mx-auto w-full max-w-5xl px-6">
+      <header className="space-y-4 border-b border-border py-16">
+        <p className="label">Index</p>
+        <h1 className="text-3xl font-bold tracking-tight sm:text-5xl">Projects</h1>
+        <p className="max-w-2xl text-sm leading-relaxed text-muted">
+          Selected hardware and software work — measurement systems, embedded firmware and the boards around them.
+        </p>
+      </header>
+
+      <section className="py-16">
+        {projects.length === 0 ? (
+          <p className="text-sm text-muted">No published projects yet.</p>
+        ) : (
+          <div className="grid gap-6 sm:grid-cols-2">
+            {projects.map((project) => (
+              <ProjectCard
+                key={project.id}
+                slug={project.slug}
+                title={project.title}
+                summary={project.summary}
+                tags={project.tags}
+                image={project.images[0]}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+===== prisma/seed.ts =====
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { PrismaClient } from "@prisma/client";
+
+// `tsx` does not read .env the way the Prisma CLI does, so load it here.
+function loadEnv(): void {
+  if (process.env.DATABASE_URL) return;
+  const file = path.resolve(process.cwd(), ".env");
+  if (!existsSync(file)) return;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const match = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
+    if (!match) continue;
+    const key = match[1] as string;
+    const value = (match[2] ?? "").replace(/^["']|["']$/g, "");
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+loadEnv();
+
+const prisma = new PrismaClient();
+
+const EXAMPLE_BANNER =
+  "> EXAMPLE project — placeholder content from SPEC.md. Replace it from the admin panel before sharing the site publicly.\n";
+
+const projects = [
+  {
+    slug: "iot-weather-station",
+    title: "IoT Weather Station",
+    summary:
+      "A solar-powered ESP32 node that reads temperature, humidity and pressure, then pushes readings over MQTT to a small dashboard.",
+    role: "Hardware and firmware",
+    tags: ["ESP32", "IoT", "MQTT"],
+
+... (5,472 chars truncated) ...
+
+ime
+
+I was sampling faster than the source impedance allowed. With a 10 k potentiometer as the source, the sample-and-hold capacitor needs time to charge through that resistance. Halving the ADC clock prescaler and throwing away the first sample after switching channels took another 6 counts off. The rule of thumb: the source impedance and the sample capacitor form an RC network, and if you sample faster than five time constants you are measuring the previous channel.
+
+## 3. Averaging, but the right kind
+
+Ten readings, discard, ten more, then average. A plain moving average of 100 samples helped less than I expected because the noise was not white: it had a strong component at the mains frequency and its harmonics. An average over exactly one mains period (20 ms at 50 Hz) cancels those components almost completely. That is the trick that made the reading stop flickering on the display.
+
+## 4. Decoupling close to the pin
+
+A 100 nF capacitor from the ADC input to analog ground, plus a 100 nF on the reference pin, removed the last visible jitter. The capacitor has to be physically close; on a breadboard, close means the same row, not the same board.
+
+## What did not help
+
+Oversampling to 12 bits in software: the noise was not random, so it just gave more decimal places of the same wrong number. Shielding the wires: the noise was conducted, not radiated.
+
+The final reading is stable to about 2 counts, which is good enough for a temperature display and a reminder that most noisy ADC problems are wiring problems.`,
+  },
+  {
+    slug: "how-i-set-up-my-kicad-workspace",
+    title: "How I set up my KiCad workspace",
+    excerpt:
+      "Symbols, footprints, and a project template that stops me from re-inventing the same sheet annotations every time.",
+    tags: ["KiCad", "PCB"],
+    publishedAt: new Date("2026-08-30T09:00:00.000Z"),
+    body: `> EXAMPLE note — replace before sharing publicly.
+
+Every board I made started the same way: create a project, realise I had forgotten a bypass capacitor, then fix the same three DRC complaints at the end. So I built a template.
+
+## One project template
+
+A folder with the schematic sheet layout already set, page numbers on, a title block with my name and the licence, and a power sheet that holds the regulators and connectors. New projects are a copy of that folder. It takes two minutes and saves about forty.
+
+## Local libraries, versioned
+
+Global libraries drift between KiCad versions. I keep a project-local symbol and footprint library checked into git, and only add to it from the board that needs the part. The footprint names include the package so I can see at a glance whether the 0603 and the 0805 variant are both present.
+
+## Rules I set once
+
+- Minimum track width 0.25 mm for signals, 0.5 mm for power
+- Clearance 0.2 mm
+- Vias 0.6/0.3 mm unless the fab charges for smaller
+- Silkscreen never under a component body
+- Every net gets a label; unnamed nets are errors
+
+## The shortcut I use most
+
+Assigning nets by label rather than drawing long wires: "3V3", "GND", "I2C_SDA". It makes the schematic readable at a glance and it means moving a block does not produce a spiderweb of crossing lines. The catch is that a typo silently creates a new net, so I run a quick check that every label appears at least twice.
+
+## Checking before ordering
+
+A fixed checklist: DRC clean, every footprint has a 3D model, board outline closed, mounting holes present, and a PDF of each layer exported to check by eye. Then order. The eye check has caught more problems than the DRC ever has.`,
+  },
+];
+
+async function main(): Promise<void> {
+  for (const project of projects) {
+    const { slug, ...data } = project;
+    await prisma.project.upsert({
+      where: { slug },
+      create: { slug, ...data, published: true },
+      update: { ...data, published: true },
+    });
+  }
+
+  for (const post of posts) {
+    const { slug, ...data } = post;
+    await prisma.post.upsert({
+      where: { slug },
+      create: { slug, ...data, published: true },
+      update: { ...data, published: true },
+    });
+  }
+
+  // Settings are only created when missing, so admin edits survive a re-seed.
+  const defaults: { key: string; value: string }[] = [
+    { key: "contactEmail", value: "fikriabqarifawwaz@gmail.com" },
+    { key: "cvUrl", value: "" },
+    {
+      key: "socials",
+      value: JSON.stringify({
+        github: "https://github.com/fikriabqarif",
+        linkedin: "https://www.linkedin.com/in/fikriabqarifawwaz",
+        instagram: "",
+      }),
+    },
+  ];
+
+  for (const setting of defaults) {
+    await prisma.setting.upsert({
+      where: { key: setting.key },
+      create: setting,
+      update: {},
+    });
+  }
+
+  console.log(`Seed complete: ${projects.length} projects, ${posts.length} notes, ${defaults.length} settings.`);
+}
+
+main()
+  .then(async () => {
+    await prisma.$disconnect();
+  })
+  .catch(async (error) => {
+    console.error(error);
+    await prisma.$disconnect();
+    process.exit(1);
+  });
+
+
+Exit code: 0

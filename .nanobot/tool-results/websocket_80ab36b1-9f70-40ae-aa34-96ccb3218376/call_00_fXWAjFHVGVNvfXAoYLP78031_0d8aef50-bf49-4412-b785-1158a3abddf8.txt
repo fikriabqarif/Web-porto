@@ -1,0 +1,210 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { isAdmin } from "@/lib/auth-guard";
+import type { FormState } from "@/lib/form-state";
+import { prisma } from "@/lib/prisma";
+import { flattenFieldErrors, postSchema } from "@/lib/validation";
+
+function text(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : "";
+}
+
+function parseTags(formData: FormData): string[] {
+  return text(formData, "tags")
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+}
+
+function revalidatePost(slug?: string): void {
+  revalidatePath("/");
+  revalidatePath("/notes");
+  if (slug) revalidatePath(`/notes/${slug}`);
+  revalidatePath("/admin/posts");
+  revalidatePath("/admin");
+  revalidatePath("/sitemap.xml");
+}
+
+export async function savePost(_previous: FormState, formData: FormData): Promise<FormState> {
+  if (!(await isAdmin())) return { status: "error", message: "Your session has expired. Please log in again." };
+
+  const parsed = postSchema.safeParse({
+    title: text(formData, "title"),
+    slug: text(formData, "slug"),
+    excerpt: text(formData, "excerpt"),
+    body: text(formData, "body"),
+    tags: parseTags(formData),
+    published: formData.getAll("intent").map(String).includes("publish"),
+  });
+
+  if (!parsed.success) {
+    return {
+      status: "error",
+      message: "Please fix the highlighted fields.",
+      errors: flattenFieldErrors(parsed.error),
+    };
+  }
+
+  const data = parsed.data;
+  const id = text(formData, "id");
+
+  const clash = await prisma.post.findUnique({ where: { slug: data.slug }, select: { id: true } });
+  if (clash && clash.id !== id) {
+    return { status: "error", message: "Please fix the highlighted fields.", errors: { slug: "That slug is already taken." } };
+  }
+
+  try {
+    if (id) {
+      const current = await prisma.post.findUnique({ where: { id }, select: { published: true } });
+      const justPublished = !current?.published && data.published;
+      await prisma.post.update({
+        where: { id },
+        data: {
+          slug: data.slug,
+          title: data.title,
+          excerpt: data.excerpt,
+          body: data.body,
+          tags: data.tags,
+          published: data.published,
+          ...(justPublished ? { publishedAt: new Date() } : {}),
+        },
+      });
+    } else {
+      await prisma.post.create({
+        data: {
+          slug: data.slug,
+          title: data.title,
+          excerpt: data.excerpt,
+          body: data.body,
+          tags: data.tags,
+          published: data.published,
+        },
+      });
+    }
+  } catch {
+    return { status: "error", message: "Could not save the note. Check the slug and try again." };
+  }
+
+  revalidatePost(data.slug);
+  redirect("/admin/posts");
+}
+
+export async function deletePost(formData: FormData): Promise<void> {
+  if (!(await isAdmin())) return;
+  const id = text(formData, "id");
+  if (!id) return;
+
+  const post = await prisma.post.findUnique({ where: { id }, select: { slug: true } });
+  await prisma.post.delete({ where: { id } });
+  revalidatePost(post?.slug);
+}
+
+export async function togglePostPublished(formData: FormData): Promise<void> {
+  if (!(await isAdmin())) return;
+  const id = text(formData, "id");
+  if (!id) return;
+
+  const post = await prisma.post.findUnique({ where: { id }, select: { published: true, slug: true } });
+  if (!post) return;
+
+  await prisma.post.update({
+    where: { id },
+    data: post.published ? { published: false } : { published: true, publishedAt: new Date() },
+  });
+  revalidatePost(post.slug);
+}
+----
+export type FormState = {
+  status: "idle" | "success" | "error";
+  message?: string;
+  errors?: Record<string, string>;
+};
+
+export const idleState: FormState = { status: "idle" };
+----
+"use client";
+
+import Link from "next/link";
+import { useActionState, useRef, useState } from "react";
+import { saveProject } from "@/actions/projects";
+import { idleState } from "@/lib/form-state";
+import { slugify } from "@/lib/slug";
+
+export type ProjectFormValues = {
+  id: string;
+  title: string;
+  slug: string;
+  summary: string;
+  description: string;
+  role: string;
+  tags: string;
+  githubUrl: string;
+  demoUrl: string;
+  featured: boolean;
+  published: boolean;
+  images: { url: string; alt: string }[];
+};
+
+type ImageEntry = { url: string; alt: string };
+
+export function ProjectForm({ initial }: { initial: ProjectFormValues }) {
+  const [state, formAction, pending] = useActionState(saveProject, idleState);
+  const [title, setTitle] = useState(initial.title);
+  const [slug, setSlug] = useState(initial.slug);
+  const [slugTouched, setSlugTouched] = useState(initial.slug.length > 0);
+  const [images, setImages] = useState<ImageEntry[]>(initial.images);
+  const [intent, setIntent] = useState<"draft" | "publish">(initial.published ? "publish" : "draft");
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const errors = state.errors ?? {};
+
+  function onTitleChange(value: string) {
+    setTitle(value);
+    if (!slugTouched) setSlug(slugify(value));
+  }
+
+  async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setUploadError(null);
+
+    try {
+      for (const file of Array.from(files)) {
+        const body = new FormData();
+        body.append("file", file);
+        body.append("prefix", "projects");
+        const response = await fetch("/api/upload", { method: "POST", body });
+        const data = (await response.json().catch(() => ({}))) as { url?: string; error?: string };
+        if (!response.ok || !data.url) throw new Error(data.error ?? "Upload failed");
+        setImages((previous) => [...previous, { url: data.url as string, alt: "" }]);
+      }
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      setUploading(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  }
+
+  function moveImage(index: number, direction: -1 | 1) {
+    setImages((previous) => {
+      const next = [...previous];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return previous;
+      const current = next[index];
+      const other = next[target];
+      if (!current || !other) return previous;
+      next[index] = other;
+      next[target] = current;
+      return next;
+    });
+  }
+
+
+
+Exit code: 0
