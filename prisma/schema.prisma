@@ -3,8 +3,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // Pooled connection (Neon -pooler host): app traffic at runtime.
+  url       = env("DATABASE_URL")
+  // Direct connection: Prisma CLI (migrate/db push/introspect). Migrations over
+  // a transaction-mode pooler fail with "prepared statement already exists".
+  directUrl = env("DATABASE_URL_UNPOOLED")
 }
 
 model Project {

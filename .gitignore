@@ -33,3 +33,5 @@ public/uploads
 # upload scratch dirs used by `npm run verify`
 public/verify
 public/cv-verify
+.nanobot
+.neon

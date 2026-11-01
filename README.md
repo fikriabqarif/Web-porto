@@ -68,7 +68,8 @@ sudo -u postgres psql -c "CREATE DATABASE webporto OWNER webporto;"
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | Postgres connection string (Neon in production, local Postgres in dev). |
+| `DATABASE_URL` | yes | Postgres connection string. On Neon use the **pooled** string (hostname contains `-pooler`) — that is what the app talks to. |
+| `DATABASE_URL_UNPOOLED` | Neon only | **Direct** (unpooled) Neon string, used only by the Prisma CLI for `migrate`/`db push`/introspect via `directUrl` in `schema.prisma`. Point it at the same local URL when working against local Postgres. |
 | `AUTH_SECRET` | yes | Auth.js signing secret. Generate with `openssl rand -base64 32`. |
 | `ADMIN_EMAIL` | yes | The single admin login email. |
 | `ADMIN_PASSWORD_HASH` | yes | bcrypt hash of the admin password from `npm run hash-password`. |
